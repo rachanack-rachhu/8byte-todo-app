@@ -1,0 +1,98 @@
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_NAME = "todo-app"
+        IMAGE_TAG  = "${env.BUILD_NUMBER}"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                dir('app') {
+                    sh 'yarn install'
+                }
+            }
+        }
+
+        stage('Run Unit & Integration Tests') {
+            steps {
+                dir('app') {
+                    sh 'yarn test'
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                dir('app') {
+                    sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
+                    sh "docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:latest"
+                }
+            }
+        }
+
+        stage('Vulnerability Scan - Container') {
+            steps {
+                dir('app') {
+                    // Using Trivy (install it on Jenkins agent if not present)
+                    sh "trivy image --exit-code 0 --severity HIGH,CRITICAL ${IMAGE_NAME}:${IMAGE_TAG} || true"
+                }
+            }
+        }
+
+        stage('Push to Registry') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo "Pushing image ${IMAGE_NAME}:${IMAGE_TAG} to registry..."
+                // We will add real push (ECR / Docker Hub) later
+            }
+        }
+
+        stage('Deploy to Staging') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo "Deploying to Staging environment..."
+                // Later we will add kubectl / helm commands
+            }
+        }
+
+        stage('Manual Approval for Production') {
+            when {
+                branch 'main'
+            }
+            steps {
+                input message: 'Deploy to Production?', ok: 'Deploy'
+            }
+        }
+
+        stage('Deploy to Production') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo "Deploying to Production environment..."
+            }
+        }
+    }
+
+    post {
+        failure {
+            echo "Pipeline failed! Sending notification..."
+            // We can add Slack / Email notification later
+        }
+        success {
+            echo "Pipeline completed successfully!"
+        }
+    }
+}
