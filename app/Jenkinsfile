@@ -49,7 +49,7 @@ pipeline {
                     yarn audit --level high || true
                 '''
                 // "|| true" prevents non-zero exit from failing the build outright;
-                // remove this once you want audit failures to actually block merges
+                // remove this once you want audit failures to actually block merges...
             }
         }
 
