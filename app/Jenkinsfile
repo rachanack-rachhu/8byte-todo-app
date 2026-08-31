@@ -2,8 +2,11 @@ pipeline {
     agent any
 
     environment {
-        IMAGE_NAME = "todo-app"
-        IMAGE_TAG  = "${env.BUILD_NUMBER}"
+        AWS_REGION     = "ap-south-1"
+        AWS_ACCOUNT_ID = "960645510575"
+        ECR_REPO       = "byte-repo"
+        IMAGE_NAME     = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+        IMAGE_TAG      = "${env.BUILD_NUMBER}"
     }
 
     stages {
@@ -44,24 +47,26 @@ pipeline {
 
         stage('Vulnerability Scan - Container') {
             steps {
-                dir('app') {
-                    sh "trivy image --exit-code 0 --severity HIGH,CRITICAL ${IMAGE_NAME}:${IMAGE_TAG}"
-                }
+                sh "trivy image --exit-code 0 --severity HIGH,CRITICAL ${IMAGE_NAME}:${IMAGE_TAG}"
             }
         }
 
-        stage('Push to Registry') {
+        stage('Push to ECR') {
             steps {
-                echo "Pushing image ${IMAGE_NAME}:${IMAGE_TAG} ..."
-                // We will add real Docker Hub / ECR push in next step
-                sh "docker images | grep ${IMAGE_NAME}"
+                sh '''
+                    aws ecr get-login-password --region $AWS_REGION | \
+                    docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+                    docker push ${IMAGE_NAME}:${IMAGE_TAG}
+                    docker push ${IMAGE_NAME}:latest
+                '''
             }
         }
 
         stage('Deploy to Staging') {
             steps {
                 echo "Deploying ${IMAGE_NAME}:${IMAGE_TAG} to Staging..."
-                // Later we will add kubectl / docker run for staging
+                // We will add real deployment in next step
             }
         }
 
@@ -80,10 +85,10 @@ pipeline {
 
     post {
         success {
-            echo "Pipeline completed successfully!"
+            echo "Pipeline completed successfully! Image pushed to ECR."
         }
         failure {
-            echo "Pipeline failed! Notification can be added here (Slack/Email)."
+            echo "Pipeline failed!"
         }
     }
 }
