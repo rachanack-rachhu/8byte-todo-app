@@ -24,7 +24,11 @@ pipeline {
         stage('Run Unit & Integration Tests') {
             steps {
                 dir('app') {
-                    sh 'yarn test'
+                    sh '''
+                        export SQLITE_DB_LOCATION=/tmp/todos/todo.db
+                        mkdir -p /tmp/todos
+                        yarn test
+                    '''
                 }
             }
         }
@@ -41,58 +45,45 @@ pipeline {
         stage('Vulnerability Scan - Container') {
             steps {
                 dir('app') {
-                    // Using Trivy (install it on Jenkins agent if not present)
-                    sh "trivy image --exit-code 0 --severity HIGH,CRITICAL ${IMAGE_NAME}:${IMAGE_TAG} || true"
+                    sh "trivy image --exit-code 0 --severity HIGH,CRITICAL ${IMAGE_NAME}:${IMAGE_TAG}"
                 }
             }
         }
 
         stage('Push to Registry') {
-            when {
-                branch 'main'
-            }
             steps {
-                echo "Pushing image ${IMAGE_NAME}:${IMAGE_TAG} to registry..."
-                // We will add real push (ECR / Docker Hub) later
+                echo "Pushing image ${IMAGE_NAME}:${IMAGE_TAG} ..."
+                // We will add real Docker Hub / ECR push in next step
+                sh "docker images | grep ${IMAGE_NAME}"
             }
         }
 
         stage('Deploy to Staging') {
-            when {
-                branch 'main'
-            }
             steps {
-                echo "Deploying to Staging environment..."
-                // Later we will add kubectl / helm commands
+                echo "Deploying ${IMAGE_NAME}:${IMAGE_TAG} to Staging..."
+                // Later we will add kubectl / docker run for staging
             }
         }
 
         stage('Manual Approval for Production') {
-            when {
-                branch 'main'
-            }
             steps {
-                input message: 'Deploy to Production?', ok: 'Deploy'
+                input message: 'Deploy to Production?', ok: 'Yes, Deploy'
             }
         }
 
         stage('Deploy to Production') {
-            when {
-                branch 'main'
-            }
             steps {
-                echo "Deploying to Production environment..."
+                echo "Deploying ${IMAGE_NAME}:${IMAGE_TAG} to Production..."
             }
         }
     }
 
     post {
-        failure {
-            echo "Pipeline failed! Sending notification..."
-            // We can add Slack / Email notification later
-        }
         success {
             echo "Pipeline completed successfully!"
+        }
+        failure {
+            echo "Pipeline failed! Notification can be added here (Slack/Email)."
         }
     }
 }
