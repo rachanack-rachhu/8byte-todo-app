@@ -1,94 +1,46 @@
-pipeline {
-    agent any
+stage('Deploy to Staging') {
+    steps {
+        sh '''
+            echo "Deploying to Staging on EKS..."
 
-    environment {
-        AWS_REGION     = "ap-south-1"
-        AWS_ACCOUNT_ID = "960645510575"
-        ECR_REPO       = "byte-repo"
-        IMAGE_NAME     = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
-        IMAGE_TAG      = "${env.BUILD_NUMBER}"
+            # Update kubeconfig
+            aws eks update-kubeconfig --region ap-south-1 --name 8byte-devops-stg
+
+            # Replace image tag in deployment
+            sed "s|TAG|${BUILD_NUMBER}|g" app/k8s/deployment.yaml > /tmp/deployment-staging.yaml
+
+            # Apply manifests
+            kubectl apply -f /tmp/deployment-staging.yaml
+            kubectl apply -f app/k8s/service.yaml
+
+            # Wait for rollout
+            kubectl rollout status deployment/todo-app
+            kubectl get svc todo-app-service
+        '''
     }
+}
 
-    stages {
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
-        }
-
-        stage('Install Dependencies') {
-            steps {
-                dir('app') {
-                    sh 'yarn install'
-                }
-            }
-        }
-
-        stage('Run Unit & Integration Tests') {
-            steps {
-                dir('app') {
-                    sh '''
-                        export SQLITE_DB_LOCATION=/tmp/todos/todo.db
-                        mkdir -p /tmp/todos
-                        yarn test
-                    '''
-                }
-            }
-        }
-
-        stage('Build Docker Image') {
-            steps {
-                dir('app') {
-                    sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
-                    sh "docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:latest"
-                }
-            }
-        }
-
-        stage('Vulnerability Scan - Container') {
-            steps {
-                sh "trivy image --exit-code 0 --severity HIGH,CRITICAL ${IMAGE_NAME}:${IMAGE_TAG}"
-            }
-        }
-
-        stage('Push to ECR') {
-            steps {
-                sh '''
-                    aws ecr get-login-password --region $AWS_REGION | \
-                    docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
-
-                    docker push ${IMAGE_NAME}:${IMAGE_TAG}
-                    docker push ${IMAGE_NAME}:latest
-                '''
-            }
-        }
-
-        stage('Deploy to Staging') {
-            steps {
-                echo "Deploying ${IMAGE_NAME}:${IMAGE_TAG} to Staging..."
-                // We will add real deployment in next step
-            }
-        }
-
-        stage('Manual Approval for Production') {
-            steps {
-                input message: 'Deploy to Production?', ok: 'Yes, Deploy'
-            }
-        }
-
-        stage('Deploy to Production') {
-            steps {
-                echo "Deploying ${IMAGE_NAME}:${IMAGE_TAG} to Production..."
-            }
-        }
+stage('Manual Approval for Production') {
+    steps {
+        input message: 'Deploy to Production?', ok: 'Yes, Deploy'
     }
+}
 
-    post {
-        success {
-            echo "Pipeline completed successfully! Image pushed to ECR."
-        }
-        failure {
-            echo "Pipeline failed!"
-        }
+stage('Deploy to Production') {
+    steps {
+        sh '''
+            echo "Deploying to Production on EKS..."
+
+            # For now using same cluster with different namespace (or change cluster name)
+            kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
+
+            sed "s|TAG|${BUILD_NUMBER}|g" app/k8s/deployment.yaml > /tmp/deployment-prod.yaml
+
+            kubectl apply -f /tmp/deployment-prod.yaml -n production
+            kubectl apply -f app/k8s/service.yaml -n production
+
+            kubectl rollout status deployment/todo-app -n production
+            kubectl get svc -n production
+        '''
     }
 }
