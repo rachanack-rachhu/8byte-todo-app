@@ -1,46 +1,226 @@
-stage('Deploy to Staging') {
-    steps {
-        sh '''
-            echo "Deploying to Staging on EKS..."
+pipeline {
+    agent any
 
-            # Update kubeconfig
-            aws eks update-kubeconfig --region ap-south-1 --name 8byte-devops-stg
-
-            # Replace image tag in deployment
-            sed "s|TAG|${BUILD_NUMBER}|g" app/k8s/deployment.yaml > /tmp/deployment-staging.yaml
-
-            # Apply manifests
-            kubectl apply -f /tmp/deployment-staging.yaml
-            kubectl apply -f app/k8s/service.yaml
-
-            # Wait for rollout
-            kubectl rollout status deployment/todo-app
-            kubectl get svc todo-app-service
-        '''
+    environment {
+        AWS_REGION     = 'ap-south-1'
+        ECR_REPO       = '960645510575.dkr.ecr.ap-south-1.amazonaws.com/byte-repo'
+        STAGING_IP     = '3.6.94.5'
+        PROD_IP        = '<production-ip>'      // fill in once prod instance exists
+        STAGING_SECRET = '8byte/staging/rds'
+        PROD_SECRET    = '8byte/production/rds'
+        NOTIFY_EMAIL   = 'rachanack123@gmail.com'
     }
-}
 
-stage('Manual Approval for Production') {
-    steps {
-        input message: 'Deploy to Production?', ok: 'Yes, Deploy'
+    options {
+        timestamps()
+        disableConcurrentBuilds()
     }
-}
 
-stage('Deploy to Production') {
-    steps {
-        sh '''
-            echo "Deploying to Production on EKS..."
+    stages {
 
-            # For now using same cluster with different namespace (or change cluster name)
-            kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
 
-            sed "s|TAG|${BUILD_NUMBER}|g" app/k8s/deployment.yaml > /tmp/deployment-prod.yaml
+        stage('Install Dependencies') {
+            steps {
+                sh '''
+                    cd app
+                    yarn install --frozen-lockfile
+                '''
+            }
+        }
 
-            kubectl apply -f /tmp/deployment-prod.yaml -n production
-            kubectl apply -f app/k8s/service.yaml -n production
+        stage('Unit & Integration Tests') {
+            steps {
+                sh '''
+                    cd app
+                    yarn test
+                '''
+            }
+        }
 
-            kubectl rollout status deployment/todo-app -n production
-            kubectl get svc -n production
-        '''
+        stage('Dependency Vulnerability Scan') {
+            steps {
+                sh '''
+                    cd app
+                    yarn audit --level high || true
+                '''
+                // "|| true" prevents non-zero exit from failing the build outright;
+                // remove this once you want audit failures to actually block merges
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh '''
+                    cd app
+                    docker build -t ${ECR_REPO}:${BUILD_NUMBER} .
+                '''
+            }
+        }
+
+        stage('Container Vulnerability Scan (Trivy)') {
+            steps {
+                sh '''
+                    trivy image --severity HIGH,CRITICAL --exit-code 0 ${ECR_REPO}:${BUILD_NUMBER}
+                '''
+                // exit-code 0 = report only, doesn't block build.
+                // Change to --exit-code 1 once you're ready to gate merges on CRITICAL findings.
+            }
+        }
+
+        stage('Push to ECR') {
+            when {
+                branch 'main'
+            }
+            steps {
+                sh '''
+                    aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPO}
+                    docker push ${ECR_REPO}:${BUILD_NUMBER}
+                '''
+            }
+        }
+
+        stage('Deploy to Staging') {
+            when {
+                branch 'main'
+            }
+            steps {
+                sshagent(credentials: ['ec2-ssh-key']) {
+                    sh '''
+                        ssh -o StrictHostKeyChecking=no ec2-user@${STAGING_IP} '
+                            set -e
+                            SECRET=$(aws secretsmanager get-secret-value --secret-id '"${STAGING_SECRET}"' --region '"${AWS_REGION}"' --query SecretString --output text)
+                            DB_HOST=$(echo $SECRET | jq -r .host)
+                            DB_PORT=$(echo $SECRET | jq -r .port)
+                            DB_NAME=$(echo $SECRET | jq -r .dbname)
+                            DB_USER=$(echo $SECRET | jq -r .username)
+                            DB_PASS=$(echo $SECRET | jq -r .password)
+
+                            aws ecr get-login-password --region '"${AWS_REGION}"' | sudo docker login --username AWS --password-stdin '"${ECR_REPO}"'
+                            sudo docker pull '"${ECR_REPO}"':'"${BUILD_NUMBER}"'
+                            sudo docker stop todo-app || true
+                            sudo docker rm todo-app || true
+                            sudo docker run -d \
+                                --name todo-app \
+                                --restart unless-stopped \
+                                -p 3000:3000 \
+                                -e NODE_ENV=production \
+                                -e POSTGRES_HOST=$DB_HOST \
+                                -e POSTGRES_PORT=$DB_PORT \
+                                -e POSTGRES_DB=$DB_NAME \
+                                -e POSTGRES_USER=$DB_USER \
+                                -e POSTGRES_PASSWORD=$DB_PASS \
+                                '"${ECR_REPO}"':'"${BUILD_NUMBER}"'
+                        '
+                    '''
+                }
+            }
+        }
+
+        stage('Smoke Test Staging') {
+            when {
+                branch 'main'
+            }
+            steps {
+                sh '''
+                    sleep 10
+                    curl -f http://${STAGING_IP}:3000 || exit 1
+                '''
+            }
+        }
+
+        stage('Manual Approval for Production') {
+            when {
+                branch 'main'
+            }
+            steps {
+                input message: 'Deploy to Production?', ok: 'Yes, Deploy'
+            }
+        }
+
+        stage('Deploy to Production') {
+            when {
+                branch 'main'
+            }
+            steps {
+                sshagent(credentials: ['ec2-ssh-key']) {
+                    sh '''
+                        ssh -o StrictHostKeyChecking=no ec2-user@${PROD_IP} '
+                            set -e
+                            SECRET=$(aws secretsmanager get-secret-value --secret-id '"${PROD_SECRET}"' --region '"${AWS_REGION}"' --query SecretString --output text)
+                            DB_HOST=$(echo $SECRET | jq -r .host)
+                            DB_PORT=$(echo $SECRET | jq -r .port)
+                            DB_NAME=$(echo $SECRET | jq -r .dbname)
+                            DB_USER=$(echo $SECRET | jq -r .username)
+                            DB_PASS=$(echo $SECRET | jq -r .password)
+
+                            aws ecr get-login-password --region '"${AWS_REGION}"' | sudo docker login --username AWS --password-stdin '"${ECR_REPO}"'
+                            sudo docker pull '"${ECR_REPO}"':'"${BUILD_NUMBER}"'
+                            sudo docker stop todo-app || true
+                            sudo docker rm todo-app || true
+                            sudo docker run -d \
+                                --name todo-app \
+                                --restart unless-stopped \
+                                -p 3000:3000 \
+                                -e NODE_ENV=production \
+                                -e POSTGRES_HOST=$DB_HOST \
+                                -e POSTGRES_PORT=$DB_PORT \
+                                -e POSTGRES_DB=$DB_NAME \
+                                -e POSTGRES_USER=$DB_USER \
+                                -e POSTGRES_PASSWORD=$DB_PASS \
+                                '"${ECR_REPO}"':'"${BUILD_NUMBER}"'
+                        '
+                    '''
+                }
+            }
+        }
+
+        stage('Smoke Test Production') {
+            when {
+                branch 'main'
+            }
+            steps {
+                sh '''
+                    sleep 10
+                    curl -f http://${PROD_IP}:3000 || exit 1
+                '''
+            }
+        }
+    }
+
+    post {
+        failure {
+            emailext(
+                subject: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: """
+                    Build failed.
+
+                    Job: ${env.JOB_NAME}
+                    Build: #${env.BUILD_NUMBER}
+                    Branch: ${env.GIT_BRANCH}
+                    Console: ${env.BUILD_URL}console
+
+                    Check the logs for details.
+                """,
+                to: "${NOTIFY_EMAIL}"
+            )
+        }
+        success {
+            emailext(
+                subject: "SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: """
+                    Build succeeded.
+
+                    Job: ${env.JOB_NAME}
+                    Build: #${env.BUILD_NUMBER}
+                    Console: ${env.BUILD_URL}console
+                """,
+                to: "${NOTIFY_EMAIL}"
+            )
+        }
     }
 }
