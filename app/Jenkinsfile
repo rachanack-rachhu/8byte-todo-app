@@ -5,7 +5,7 @@ pipeline {
         AWS_REGION     = 'ap-south-1'
         ECR_REPO       = '960645510575.dkr.ecr.ap-south-1.amazonaws.com/byte-repo'
         STAGING_IP     = '3.6.94.5'
-        PROD_IP        = '<production-ip>'      // fill in once prod instance exists
+        PROD_IP        = '13.234.231.19'      
         STAGING_SECRET = '8byte/staging/rds'
         PROD_SECRET    = '8byte/production/rds'
         NOTIFY_EMAIL   = 'rachanack123@gmail.com'
