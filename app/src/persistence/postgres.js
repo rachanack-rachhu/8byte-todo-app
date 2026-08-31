@@ -31,13 +31,16 @@ async function init() {
     });
 
     pool = new Pool({
-        host,
-        user,
-        password,
-        database,
-        port,
-        max: 5,
-    });
+    host,
+    user,
+    password,
+    database,
+    port,
+    max: 5,
+    ssl: {
+        rejectUnauthorized: false,
+    },
+});
 
     return new Promise((acc, rej) => {
         pool.query(
